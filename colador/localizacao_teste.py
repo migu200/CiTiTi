@@ -1,25 +1,21 @@
-"""Ferramenta de QA isolada para testar extração de código postal e geocodificação.
+"""Ferramenta de teste para extrair um código postal português de uma morada.
 
-Não altera o GPS do Android/BlueStacks nem interage com a MobiCTT.
-Usa a Google Geocoding API com uma chave própria em GOOGLE_MAPS_API_KEY.
+Não usa APIs pagas, não altera o GPS e não interage com a MobiCTT/BlueStacks.
+Quando possível, copia o código postal para a área de transferência do Windows.
 
-Uso (PowerShell):
-    $env:GOOGLE_MAPS_API_KEY="A_TUA_CHAVE"
-    python localizacao_teste.py "Rua Exemplo, 2775-305 Parede, Portugal"
+Uso:
+    python localizacao_teste.py "Rua de exemplo, 2775-002 Madorna, Portugal"
+    python localizacao_teste.py --morada "Morada sem código postal"
 """
 import argparse
 import csv
 import json
-import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import requests
-
 POSTAL_CODE = re.compile(r"(?<!\d)(\d{4})\s*-\s*(\d{3})(?!\d)")
-API_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 LOG_FILE = Path(__file__).resolve().parent / "resultados_localizacao_teste.csv"
 
 
@@ -29,56 +25,20 @@ def extrair_codigo_postal(morada: str) -> str | None:
     return f"{match.group(1)}-{match.group(2)}" if match else None
 
 
-def geocodificar(texto: str, *, codigo_postal: str | None = None) -> dict | None:
-    """Geocodifica um código postal ou morada completa usando uma chave do utilizador."""
-    chave = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-    if not chave:
-        raise RuntimeError("Define a variável de ambiente GOOGLE_MAPS_API_KEY com uma chave válida.")
+def copiar_para_area_transferencia(texto: str) -> bool:
+    """Copia texto para o clipboard do Windows usando apenas a biblioteca padrão."""
+    try:
+        import tkinter as tk
 
-    consulta = codigo_postal or texto.strip()
-    params = {"address": consulta, "components": "country:PT", "key": chave, "region": "pt"}
-    response = requests.get(API_URL, params=params, timeout=15)
-    response.raise_for_status()
-    dados = response.json()
-    if dados.get("status") == "ZERO_RESULTS":
-        return None
-    if dados.get("status") != "OK" or not dados.get("results"):
-        raise RuntimeError(f"Google Geocoding API devolveu: {dados.get('status', 'resposta inválida')}")
-
-    item = dados["results"][0]
-    loc = item["geometry"]["location"]
-    return {
-        "latitude": float(loc["lat"]),
-        "longitude": float(loc["lng"]),
-        "nome_resultado": item.get("formatted_address", ""),
-        "tipo_resultado": ", ".join(item.get("types", [])),
-        "origem_consulta": "codigo_postal" if codigo_postal else "morada_completa",
-        "precisao": item.get("geometry", {}).get("location_type", "desconhecida"),
-        "place_id": item.get("place_id", ""),
-    }
-
-
-def resolver_morada(morada: str) -> dict:
-    """Tenta o código postal primeiro; sem resultado, tenta a morada completa."""
-    morada = (morada or "").strip()
-    if not morada:
-        raise ValueError("A morada está vazia.")
-
-    codigo_postal = extrair_codigo_postal(morada)
-    if codigo_postal:
-        resultado = geocodificar(morada, codigo_postal=codigo_postal)
-        if resultado:
-            return {"morada_recebida": morada, "codigo_postal": codigo_postal,
-                    "estado": "coordenadas_encontradas", **resultado}
-
-    resultado = geocodificar(morada)
-    if resultado:
-        return {"morada_recebida": morada, "codigo_postal": codigo_postal,
-                "estado": "coordenadas_encontradas", **resultado}
-
-    return {"morada_recebida": morada, "codigo_postal": codigo_postal,
-            "estado": "localizacao_nao_encontrada", "latitude": None, "longitude": None,
-            "origem_consulta": None, "precisao": None, "nome_resultado": ""}
+        root = tk.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.clipboard_append(texto)
+        root.update()
+        root.destroy()
+        return True
+    except Exception:
+        return False
 
 
 def registar(resultado: dict) -> None:
@@ -86,8 +46,7 @@ def registar(resultado: dict) -> None:
     with LOG_FILE.open("a", encoding="utf-8-sig", newline="") as ficheiro:
         writer = csv.DictWriter(
             ficheiro,
-            fieldnames=["data", "morada_recebida", "codigo_postal", "estado",
-                        "latitude", "longitude", "origem_consulta", "precisao", "nome_resultado"],
+            fieldnames=["data", "morada_recebida", "codigo_postal", "estado", "copiado_clipboard"],
             delimiter=";",
             extrasaction="ignore",
         )
@@ -97,23 +56,41 @@ def registar(resultado: dict) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Testa extração de código postal e geocodificação (sem alterar GPS).")
-    parser.add_argument("morada", nargs="?", help="Morada devolvida pela aplicação")
-    parser.add_argument("--morada", dest="morada_opcao", help="Morada devolvida pela aplicação")
+    parser = argparse.ArgumentParser(
+        description="Extrai um código postal português e tenta copiá-lo para a área de transferência."
+    )
+    parser.add_argument("morada", nargs="?", help="Morada recebida da aplicação")
+    parser.add_argument("--morada", dest="morada_opcao", help="Morada recebida da aplicação")
     args = parser.parse_args()
-    morada = args.morada_opcao or args.morada
+    morada = (args.morada_opcao or args.morada or "").strip()
     if not morada:
         parser.error("indica a morada como argumento.")
-    try:
-        resultado = resolver_morada(morada)
-        registar(resultado)
-    except (requests.RequestException, RuntimeError, ValueError, KeyError) as erro:
-        print(f"ERRO: {erro}", file=sys.stderr)
-        return 1
 
+    codigo_postal = extrair_codigo_postal(morada)
+    if codigo_postal:
+        copiado = copiar_para_area_transferencia(codigo_postal)
+        resultado = {
+            "morada_recebida": morada,
+            "codigo_postal": codigo_postal,
+            "estado": "codigo_postal_encontrado",
+            "copiado_clipboard": copiado,
+        }
+        print(f"Código postal encontrado: {codigo_postal}")
+        print("Copiado para a área de transferência." if copiado else
+              "Não foi possível copiar automaticamente; copia o código acima.")
+    else:
+        resultado = {
+            "morada_recebida": morada,
+            "codigo_postal": None,
+            "estado": "codigo_postal_nao_encontrado",
+            "copiado_clipboard": False,
+        }
+        print("Não foi encontrado um código postal português na morada.")
+
+    registar(resultado)
     print(json.dumps(resultado, ensure_ascii=False, indent=2))
     print(f"Registo guardado em: {LOG_FILE}")
-    return 0 if resultado["estado"] == "coordenadas_encontradas" else 2
+    return 0 if codigo_postal else 2
 
 
 if __name__ == "__main__":
