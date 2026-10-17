@@ -1,0 +1,4 @@
+requests
+zxing-cpp
+pillow
+keyring
